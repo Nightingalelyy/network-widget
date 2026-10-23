@@ -14,7 +14,7 @@ A portable, native Windows desktop widget for live download and upload speeds. K
 
 ### Download and run
 
-1. [Download the portable ZIP](download/NetSpeedWidget-portable.zip).
+1. [Download the portable ZIP from GitHub Releases](https://github.com/Nightingalelyy/network-widget/releases/latest/download/NetSpeedWidget-portable.zip).
 2. Extract the whole archive to a folder you can write to.
 3. Open `NetSpeedWidget.exe`. Keep `NetSpeedWidget.exe.config` beside it.
 
@@ -122,7 +122,7 @@ Adapter readings use Microsoft's [`GetIfTable2`](https://learn.microsoft.com/en-
 
 ### 下载与运行
 
-1. [下载便携版 ZIP](download/NetSpeedWidget-portable.zip)。
+1. [从 GitHub Releases 下载便携版 ZIP](https://github.com/Nightingalelyy/network-widget/releases/latest/download/NetSpeedWidget-portable.zip)。
 2. 将压缩包完整解压到当前账户可写入的文件夹。
 3. 打开 `NetSpeedWidget.exe`，并将 `NetSpeedWidget.exe.config` 保留在同一文件夹中。
 
