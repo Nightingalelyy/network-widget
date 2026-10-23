@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -14,6 +15,9 @@ namespace NetSpeedWidget
             try
             {
                 Run("ETW native layouts", NativeLayouts);
+                Run("Manifest TCP/UDP IPv4/IPv6 IDs, payloads and direction", DecodeManifestTraffic);
+                Run("Manifest unknown schemas and non-data events are excluded", DecodeManifestFiltering);
+                Run("Native errors retain operation and elevation codes", NativeErrors);
                 Run("TCP/UDP IPv4/IPv6 payload attribution and direction", DecodeTraffic);
                 Run("Retransmits, unrelated events, and malformed data are excluded", DecodeFiltering);
                 Run("Monotonic rate intervals and unsigned byte totals", RateIntervals);
@@ -71,10 +75,77 @@ namespace NetSpeedWidget
             {
                 EtwNative.EventTraceProperties p = buffer.Read();
                 Assert(p.LogFileNameOffset == 0, "no trace file");
-                Assert(p.LogFileMode == (0x100 | 0x02000000), "real-time custom system logger");
-                Assert(p.EnableFlags == (0x10000 | 0x10000000), "only network events, no disk IO");
+                Assert(p.LogFileMode == 0x100, "real-time ordinary session avoids eight-system-logger quota");
+                Assert(p.EnableFlags == 0, "no legacy kernel enable flags on a manifest session");
                 Assert(p.Wnode.Guid != new Guid("9e814aad-3204-11d2-9a82-006008a86939"), "not global kernel logger GUID");
             }
+        }
+
+        private static void DecodeManifestTraffic()
+        {
+            ushort[] ids = { 10, 11, 26, 27, 42, 43, 58, 59 };
+            ushort[] lengths = { 36, 28, 60, 52, 28, 28, 52, 52 };
+            for (int i = 0; i < ids.Length; i++)
+            {
+                using (Payload payload = new Payload(4321, 0xF0000000U))
+                {
+                    EtwNative.EventRecord record = ManifestRecord(ids[i], payload.Pointer, lengths[i]);
+                    record.Header.ProcessId = 4; // Receive callbacks may execute on a system thread.
+                    ProcessNetworkEvent decoded; bool malformed;
+                    Assert(ProcessNetworkDecoder.TryDecode(record, out decoded, out malformed), "manifest ID " + ids[i]);
+                    Assert(!malformed && decoded.ProcessId == 4321, "manifest payload PID, not header PID");
+                    Equal(0xF0000000U, decoded.Bytes, "manifest unsigned size");
+                    Assert(decoded.IsReceive == (ids[i] % 2 == 1), "manifest direction " + ids[i]);
+                    Equal(123456789, decoded.UtcFileTime, "manifest UTC event timestamp");
+                    Assert(record.Header.Descriptor.Level <= EtwNative.NetworkLevel &&
+                        (record.Header.Descriptor.Keyword & EtwNative.NetworkKeywords) != 0,
+                        "provider enable configuration includes each IPv4/IPv6 data template");
+                    record.UserDataLength--;
+                    Assert(!ProcessNetworkDecoder.TryDecode(record, out decoded, out malformed) && malformed,
+                        "reject truncated manifest template " + ids[i]);
+                }
+            }
+        }
+
+        private static void DecodeManifestFiltering()
+        {
+            using (Payload payload = new Payload(1, 100))
+            {
+                ProcessNetworkEvent decoded; bool malformed;
+                foreach (ushort id in new ushort[] { 12, 13, 14, 15, 16, 17, 18, 28, 29, 30, 31, 32, 33, 34, 44, 60, 999 })
+                {
+                    EtwNative.EventRecord record = ManifestRecord(id, payload.Pointer, 64);
+                    record.Header.Descriptor.Opcode = 10; // A matching opcode alone must not count it.
+                    Assert(!ProcessNetworkDecoder.TryDecode(record, out decoded, out malformed) && !malformed,
+                        "exclude manifest non-data ID " + id);
+                }
+                EtwNative.EventRecord bad = ManifestRecord(26, payload.Pointer, 64);
+                bad.Header.Descriptor.Opcode = 26;
+                Assert(!ProcessNetworkDecoder.TryDecode(bad, out decoded, out malformed) && malformed, "reject classic IPv6 opcode in manifest event");
+                bad = ManifestRecord(42, payload.Pointer, 64);
+                bad.Header.Descriptor.Task = 10;
+                Assert(!ProcessNetworkDecoder.TryDecode(bad, out decoded, out malformed) && malformed, "reject wrong manifest task");
+                bad = ManifestRecord(10, payload.Pointer, 64);
+                bad.Header.Descriptor.Version = 1;
+                Assert(!ProcessNetworkDecoder.TryDecode(bad, out decoded, out malformed) && malformed, "unknown manifest version is not silently decoded as classic");
+                bad = ManifestRecord(59, IntPtr.Zero, 64);
+                Assert(!ProcessNetworkDecoder.TryDecode(bad, out decoded, out malformed) && malformed, "reject null manifest payload");
+            }
+        }
+
+        private static void NativeErrors()
+        {
+            Win32Exception session = EtwNative.Error("StartTrace", 1450);
+            Win32Exception provider = EtwNative.Error("EnableTraceEx2", 1450);
+            Assert(session.NativeErrorCode == 1450 && session.Message.Contains("monitoring sessions") && session.Message.Contains("StartTrace"), "session capacity has actionable cause and operation");
+            Assert(provider.NativeErrorCode == 1450 && provider.Message.Contains("network-monitoring slots") && provider.Message.Contains("EnableTraceEx2"), "provider quota is distinguished from session quota");
+            foreach (uint code in new uint[] { 5, 1314 })
+            {
+                Win32Exception denied = EtwNative.Error("EnableTraceEx2", code);
+                Assert(denied.NativeErrorCode == code && denied.Message.Contains("EnableTraceEx2"), "elevation classification survives contextual message");
+            }
+            Win32Exception unknown = EtwNative.Error("OpenTrace", 87);
+            Assert(unknown.NativeErrorCode == 87 && unknown.Message.Contains("87") && unknown.Message.Contains("OpenTrace"), "other native failures retain operation and numeric code");
         }
 
         private static void DecodeTraffic()
@@ -214,6 +285,12 @@ namespace NetSpeedWidget
                 Console.WriteLine("  Native state: " + sample.Status + (sample.Error == null ? "" : " (" + sample.Error + ")"));
                 if (sample.IsRunning)
                 {
+                    using (EtwNative.PropertiesBuffer properties = new EtwNative.PropertiesBuffer(name, Guid.Empty))
+                    {
+                        Equal(0, EtwNative.ControlTrace(0, name, properties.Pointer, 0), "query live ordinary session");
+                        EtwNative.EventTraceProperties live = properties.Read();
+                        Assert((live.LogFileMode & 0x02000000) == 0 && live.EnableFlags == 0, "live monitor consumes no system logger slot");
+                    }
                     Thread.Sleep(1200);
                     sample = monitor.Sample();
                     Assert(sample.IsRunning, "native consumer stays active");
@@ -257,6 +334,19 @@ namespace NetSpeedWidget
             record.Header.Descriptor.Version = version;
             record.Header.TimeStamp = 123456789;
             record.UserData = payload; record.UserDataLength = length;
+            return record;
+        }
+
+        private static EtwNative.EventRecord ManifestRecord(ushort id, IntPtr payload, ushort length)
+        {
+            bool tcp = id < 42;
+            bool receive = (id % 2) == 1;
+            EtwNative.EventRecord record = Record(ProcessNetworkDecoder.NetworkProvider,
+                (byte)(tcp ? (receive ? 11 : 10) : (receive ? 43 : 42)), 0, payload, length);
+            record.Header.Descriptor.Id = id;
+            record.Header.Descriptor.Task = (ushort)(tcp ? 10 : 11);
+            record.Header.Descriptor.Level = 4;
+            record.Header.Descriptor.Keyword = 0x8000000000000000UL | (id == 26 || id == 27 || id == 58 || id == 59 ? 0x20UL : 0x10UL);
             return record;
         }
 

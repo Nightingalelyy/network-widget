@@ -218,6 +218,7 @@ namespace NetSpeedWidget
             private Timer healthTimer;
             private EtwNative.EventRecordCallback eventCallback;
             private EtwNative.BufferCallback bufferCallback;
+            private bool providerEnabled;
             private bool closed;
             internal volatile bool Cancelled;
 
@@ -243,8 +244,15 @@ namespace NetSpeedWidget
                             using (EtwNative.PropertiesBuffer properties = new EtwNative.PropertiesBuffer(name, guid))
                             {
                                 uint result = EtwNative.StartTrace(out controller, name, properties.Pointer);
-                                if (result != 0) { controller = 0; throw new Win32Exception((int)result); }
+                                if (result != 0) { controller = 0; throw EtwNative.Error("StartTrace", result); }
                             }
+                            // The manifest provider uses an ordinary trace session. A system logger
+                            // would compete for Windows' eight kernel logger slots with other apps.
+                            Guid provider = ProcessNetworkDecoder.NetworkProvider;
+                            uint enabled = EtwNative.EnableTraceEx2(controller, ref provider, 1,
+                                EtwNative.NetworkLevel, EtwNative.NetworkKeywords, 0, 1000, IntPtr.Zero);
+                            if (enabled != 0) throw EtwNative.Error("EnableTraceEx2", enabled);
+                            providerEnabled = true;
                             eventCallback = OnEvent;
                             bufferCallback = delegate(IntPtr bufferInfo) { return Cancelled ? 0U : 1U; };
                             EtwNative.EventTraceLogfile logfile = new EtwNative.EventTraceLogfile();
@@ -253,7 +261,7 @@ namespace NetSpeedWidget
                             logfile.EventRecordCallback = Marshal.GetFunctionPointerForDelegate(eventCallback);
                             logfile.BufferCallback = Marshal.GetFunctionPointerForDelegate(bufferCallback);
                             consumer = EtwNative.OpenTrace(ref logfile);
-                            if (consumer == EtwNative.InvalidConsumerHandle) throw new Win32Exception(Marshal.GetLastWin32Error());
+                            if (consumer == EtwNative.InvalidConsumerHandle) throw EtwNative.Error("OpenTrace", unchecked((uint)Marshal.GetLastWin32Error()));
                             healthTimer = new Timer(CheckHealth, null, 1000, 1000);
                         }
                         if (Cancelled) return;
@@ -263,7 +271,7 @@ namespace NetSpeedWidget
                         if (handle != EtwNative.InvalidConsumerHandle)
                         {
                             uint result = EtwNative.ProcessTrace(new ulong[] { handle }, 1, IntPtr.Zero, IntPtr.Zero);
-                            if (!Cancelled && result != 0 && result != 1223) throw new Win32Exception((int)result);
+                            if (!Cancelled && result != 0 && result != 1223) throw EtwNative.Error("ProcessTrace", result);
                         }
                     }
                     finally
@@ -281,12 +289,12 @@ namespace NetSpeedWidget
                 {
                     uint result = EtwNative.ControlTrace(0, name, properties.Pointer, 0); // QUERY
                     if (result == 4201) return; // No session with our name exists.
-                    if (result != 0) throw new Win32Exception((int)result);
+                    if (result != 0) throw EtwNative.Error("ControlTrace query", result);
                     EtwNative.EventTraceProperties existing = properties.Read();
                     if (existing.Wnode.Guid != guid)
                         throw new InvalidOperationException("The app traffic session name is in use by another owner.");
                     result = EtwNative.ControlTrace(0, name, properties.Pointer, 1); // STOP only verified orphan
-                    if (result != 0 && result != 4201) throw new Win32Exception((int)result);
+                    if (result != 0 && result != 4201) throw EtwNative.Error("ControlTrace cleanup", result);
                 }
             }
 
@@ -333,6 +341,12 @@ namespace NetSpeedWidget
                     if (closed) return;
                     if (controller != 0)
                     {
+                        if (providerEnabled)
+                        {
+                            Guid provider = ProcessNetworkDecoder.NetworkProvider;
+                            EtwNative.EnableTraceEx2(controller, ref provider, 0, 0, 0, 0, 1000, IntPtr.Zero);
+                            providerEnabled = false;
+                        }
                         using (EtwNative.PropertiesBuffer properties = new EtwNative.PropertiesBuffer(name, guid))
                             EtwNative.ControlTrace(controller, null, properties.Pointer, 1);
                         controller = 0;
@@ -371,6 +385,7 @@ namespace NetSpeedWidget
 
     internal static class ProcessNetworkDecoder
     {
+        internal static readonly Guid NetworkProvider = new Guid("7dd42a49-5329-4832-8dfd-43d979153a88");
         internal static readonly Guid TcpProvider = new Guid("9a280ac0-c8e0-11d1-84e2-00c04fb998a2");
         internal static readonly Guid UdpProvider = new Guid("bf3a50c5-a9c9-4988-a005-2df0b7c80f80");
 
@@ -378,14 +393,44 @@ namespace NetSpeedWidget
         {
             result = new ProcessNetworkEvent();
             malformed = false;
-            if (record.Header.ProviderId != TcpProvider && record.Header.ProviderId != UdpProvider) return false;
             byte opcode = record.Header.Descriptor.Opcode;
-            if (opcode != 10 && opcode != 11 && opcode != 26 && opcode != 27) return false;
-            // Documented v1/v2 payloads begin with uint32 PID, uint32 size for both protocols.
-            // Header PID can belong to a system thread on receives, and must never be used here.
             byte version = record.Header.Descriptor.Version;
-            if ((version != 1 && version != 2) || (version == 1 && opcode >= 26) ||
-                record.UserData == IntPtr.Zero || record.UserDataLength < 8)
+            int minimumLength = 8;
+            bool receive;
+            if (record.Header.ProviderId == NetworkProvider)
+            {
+                // Manifest IPv6 events keep the IPv4 opcode, unlike the classic provider.
+                // Identify the eight data events by ID; exclude retransmits, copies and connects.
+                ushort id = record.Header.Descriptor.Id;
+                bool tcp = id == 10 || id == 11 || id == 26 || id == 27;
+                bool udp = id == 42 || id == 43 || id == 58 || id == 59;
+                if (!tcp && !udp) return false;
+                receive = id == 11 || id == 27 || id == 43 || id == 59;
+                byte expectedOpcode = (byte)(tcp ? (receive ? 11 : 10) : (receive ? 43 : 42));
+                if (version != 0 || record.Header.Descriptor.Task != (tcp ? 10 : 11) || opcode != expectedOpcode)
+                {
+                    malformed = true;
+                    return false;
+                }
+                // Version 0 uses fixed-width UInt32 fields even on 64-bit Windows.
+                // A complete template is 28/36 bytes for IPv4 and 52/60 for IPv6.
+                bool ipv6 = id == 26 || id == 27 || id == 58 || id == 59;
+                minimumLength = (ipv6 ? 52 : 28) + (tcp && !receive ? 8 : 0);
+            }
+            else
+            {
+                if (record.Header.ProviderId != TcpProvider && record.Header.ProviderId != UdpProvider) return false;
+                if (opcode != 10 && opcode != 11 && opcode != 26 && opcode != 27) return false;
+                if ((version != 1 && version != 2) || (version == 1 && opcode >= 26))
+                {
+                    malformed = true;
+                    return false;
+                }
+                receive = opcode == 11 || opcode == 27;
+            }
+            // Both supported schemas begin with uint32 PID and uint32 size. The header
+            // PID can identify a system thread on receives, so always use the payload PID.
+            if (record.UserData == IntPtr.Zero || record.UserDataLength < minimumLength)
             {
                 malformed = true;
                 return false;
@@ -395,7 +440,7 @@ namespace NetSpeedWidget
             if (pid > Int32.MaxValue || bytes == 0) return false;
             result.ProcessId = (int)pid;
             result.Bytes = bytes;
-            result.IsReceive = opcode == 11 || opcode == 27;
+            result.IsReceive = receive;
             result.UtcFileTime = record.Header.TimeStamp;
             return true;
         }
@@ -524,15 +569,29 @@ namespace NetSpeedWidget
 
     internal static class EtwNative
     {
+        internal const byte NetworkLevel = 4; // Informational data events.
+        internal const ulong NetworkKeywords = 0x10 | 0x20; // IPv4 and IPv6 only.
         internal static readonly ulong InvalidConsumerHandle = IntPtr.Size == 8 ? UInt64.MaxValue : UInt32.MaxValue;
         [UnmanagedFunctionPointer(CallingConvention.Winapi)] internal delegate void EventRecordCallback(IntPtr record);
         [UnmanagedFunctionPointer(CallingConvention.Winapi)] internal delegate uint BufferCallback(IntPtr logfile);
 
         [DllImport("advapi32.dll", EntryPoint = "StartTraceW", CharSet = CharSet.Unicode)] internal static extern uint StartTrace(out ulong session, string name, IntPtr properties);
         [DllImport("advapi32.dll", EntryPoint = "ControlTraceW", CharSet = CharSet.Unicode)] internal static extern uint ControlTrace(ulong session, string name, IntPtr properties, uint code);
+        [DllImport("advapi32.dll")] internal static extern uint EnableTraceEx2(ulong session, ref Guid provider, uint controlCode, byte level, ulong matchAnyKeyword, ulong matchAllKeyword, uint timeout, IntPtr parameters);
         [DllImport("advapi32.dll", EntryPoint = "OpenTraceW", CharSet = CharSet.Unicode, SetLastError = true)] internal static extern ulong OpenTrace(ref EventTraceLogfile logfile);
         [DllImport("advapi32.dll")] internal static extern uint ProcessTrace([In] ulong[] handles, uint count, IntPtr start, IntPtr end);
         [DllImport("advapi32.dll")] internal static extern uint CloseTrace(ulong handle);
+
+        internal static Win32Exception Error(string operation, uint code)
+        {
+            string message;
+            if (code == 1450)
+                message = operation == "EnableTraceEx2"
+                    ? "No free network-monitoring slots. Close another monitor and retry."
+                    : "No free monitoring sessions. Close another monitor and retry.";
+            else message = new Win32Exception(unchecked((int)code)).Message;
+            return new Win32Exception(unchecked((int)code), message + " (" + operation + ", error " + code.ToString(CultureInfo.InvariantCulture) + ")");
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct WnodeHeader
@@ -669,9 +728,9 @@ namespace NetSpeedWidget
                 properties.BufferSize = 64;
                 properties.MinimumBuffers = 4;
                 properties.MaximumBuffers = 64;
-                properties.LogFileMode = 0x00000100 | 0x02000000; // REAL_TIME | SYSTEM_LOGGER_MODE
+                properties.LogFileMode = 0x00000100; // REAL_TIME; does not use a system logger slot.
                 properties.FlushTimer = 1;
-                properties.EnableFlags = 0x00010000 | 0x10000000; // NETWORK_TCPIP | NO_SYSCONFIG
+                properties.EnableFlags = 0; // Manifest network events are enabled with EnableTraceEx2.
                 properties.LoggerNameOffset = (uint)structureSize;
                 properties.LogFileNameOffset = 0;
                 Marshal.StructureToPtr(properties, Pointer, false);

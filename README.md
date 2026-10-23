@@ -80,7 +80,7 @@ Relative output paths are resolved from your current PowerShell directory. The d
 
 `Test.ps1` compiles three independent test executables in `test-output`:
 
-- **20 measurement tests** across the adapter and process monitors, covering native layouts, event decoding, elapsed-time rates, adapter selection, lifecycle changes, error handling, and native smoke checks.
+- **23 measurement tests** across the adapter and process monitors, covering native layouts, manifest and classic event decoding, elapsed-time rates, adapter selection, lifecycle changes, error handling, and native smoke checks.
 - **37 UI assertions** using synthetic samples, covering app grouping, PIDs, numeric sorting, selection, scrolling, permission states, units, and 150% display scaling.
 
 The native tracing smoke check reports an expected permission state when run without sufficient access and does not request elevation. Live tracing with administrator permission and the widget's expand/collapse workflow have also been verified on the development PC. These checks do not establish compatibility with every Windows version, device, or network configuration.
@@ -99,7 +99,7 @@ The native tracing smoke check reports an expected permission state when run wit
 | `*Tests.cs` | Measurement and process-view tests |
 | [app.manifest](app.manifest), [NetSpeedWidget.exe.config](NetSpeedWidget.exe.config) | Normal-user startup, system DPI awareness, and runtime configuration |
 
-Adapter readings use Microsoft's [`GetIfTable2`](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2) and [`MIB_IF_ROW2`](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_row2). Process readings use real-time [Event Tracing for Windows](https://learn.microsoft.com/en-us/windows/win32/etw/event-tracing-portal), including [TCP/IP](https://learn.microsoft.com/en-us/windows/win32/etw/tcpip) and [UDP/IP](https://learn.microsoft.com/en-us/windows/win32/etw/udpip) events.
+Adapter readings use Microsoft's [`GetIfTable2`](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2) and [`MIB_IF_ROW2`](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_row2). Process readings use real-time [Event Tracing for Windows](https://learn.microsoft.com/en-us/windows/win32/etw/event-tracing-portal) with the built-in `Microsoft-Windows-Kernel-Network` provider in a regular trace session. This avoids the eight-session limit for system loggers that could prevent v1.1.0 from starting app details. The widget does not stop or change tracing sessions owned by other applications.
 
 ### Troubleshooting
 
@@ -188,7 +188,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build.ps1 -OutputDirec
 
 `Test.ps1` 会在 `test-output` 中分别编译三个独立的测试程序：
 
-- **20 项测量测试：** 覆盖网卡与进程监测，包括原生结构布局、事件解析、基于实际时间的速率计算、网卡选择、生命周期变化、错误处理和原生接口冒烟检查。
+- **23 项测量测试：** 覆盖网卡与进程监测，包括原生结构布局、清单式与传统事件解析、基于实际时间的速率计算、网卡选择、生命周期变化、错误处理和原生接口冒烟检查。
 - **37 项界面断言：** 使用合成数据，覆盖应用分组、PID、数值排序、选择状态、滚动、权限状态、单位和 150% 显示缩放。
 
 原生跟踪冒烟检查在权限不足时会报告预期的权限状态，不会请求提权。在开发电脑上，还验证了管理员权限下的实时跟踪以及小组件的展开/收起流程。这些检查并不代表已验证所有 Windows 版本、设备或网络配置。
@@ -207,7 +207,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build.ps1 -OutputDirec
 | `*Tests.cs` | 测量与进程视图测试 |
 | [app.manifest](app.manifest)、[NetSpeedWidget.exe.config](NetSpeedWidget.exe.config) | 普通用户启动、系统 DPI 感知与运行时配置 |
 
-网卡读数使用 Microsoft 的 [`GetIfTable2`](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2) 和 [`MIB_IF_ROW2`](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_row2)。进程读数使用实时 [Windows 事件跟踪（ETW）](https://learn.microsoft.com/en-us/windows/win32/etw/event-tracing-portal)，包括 [TCP/IP](https://learn.microsoft.com/en-us/windows/win32/etw/tcpip) 和 [UDP/IP](https://learn.microsoft.com/en-us/windows/win32/etw/udpip) 事件。
+网卡读数使用 Microsoft 的 [`GetIfTable2`](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2) 和 [`MIB_IF_ROW2`](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_row2)。进程读数通过实时 [Windows 事件跟踪（ETW）](https://learn.microsoft.com/en-us/windows/win32/etw/event-tracing-portal)，在普通跟踪会话中使用系统内置的 `Microsoft-Windows-Kernel-Network` 提供程序。这避免了系统日志记录器最多八个会话的限制，该限制曾导致 v1.1.0 无法启动应用详情。小组件不会停止或修改其他应用拥有的跟踪会话。
 
 ### 常见问题
 
