@@ -1,0 +1,24 @@
+# Local build and test artifacts
+/dist/
+/staging/
+/releases/
+/publish-build/
+/test-output/
+*.exe
+*.dll
+*.pdb
+*.zip
+!/download/NetSpeedWidget-portable.zip
+
+# Machine-specific settings and diagnostics
+settings.xml
+settings.xml.tmp
+*.etl
+*.log
+
+# Editor output
+.vs/
+bin/
+obj/
+*.user
+*.suo
